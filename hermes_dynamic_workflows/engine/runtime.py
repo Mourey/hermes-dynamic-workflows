@@ -32,6 +32,8 @@ class WorkflowOptions:
     cwd: str | None = None
     config: PluginConfig | None = None
     child_runner: ChildAgentRunner | None = None
+    child_runners: dict[str, ChildAgentRunner] | None = None
+    default_runner: str = "hermes"
     stop_event: threading.Event | None = None
     pause_gate: PauseGate | None = None
     resume_cache: ResumeCache | None = None
@@ -112,12 +114,17 @@ async def _run_workflow_async(script: str, options: WorkflowOptions | None = Non
     frame = options.frame
 
     if context is None:
-        if options.child_runner is None:
-            from ..child.runner import HermesChildAgentRunner
+        from ..child.runners import build_runner_registry
 
-            child_runner = HermesChildAgentRunner(config)
+        if options.child_runners:
+            child_runners = dict(options.child_runners)
         else:
-            child_runner = options.child_runner
+            hermes_runner = options.child_runner
+            if hermes_runner is None:
+                from ..child.runner import HermesChildAgentRunner
+
+                hermes_runner = HermesChildAgentRunner(config)
+            child_runners = build_runner_registry(config, hermes_runner)
         stop_event = options.stop_event or threading.Event()
         pause_gate = options.pause_gate or PauseGate()
         root = WorkflowFrame(
@@ -130,7 +137,8 @@ async def _run_workflow_async(script: str, options: WorkflowOptions | None = Non
         )
         context = WorkflowExecutionContext(
             config=config,
-            runner=child_runner,
+            runners=child_runners,
+            default_runner=options.default_runner,
             stop_event=stop_event,
             pause_gate=pause_gate,
             resume_cache=options.resume_cache or ResumeCache(),

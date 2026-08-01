@@ -57,6 +57,7 @@ class WorkflowAPI:
         self.context = context
         self.frame = frame
         self.runner = context.runner
+        self.runners = context.runners
         self.config = context.config
         self.resume_cache = context.resume_cache
         self.depth = depth
@@ -102,7 +103,13 @@ class WorkflowAPI:
             config=self.config,
             structured_output=schema is not None,
             phase_model=_phase_model(self.frame, phase_name),
+            default_runner=self.context.default_runner,
         )
+
+        runner_name = resolved.runner or self.context.default_runner
+        # Fail here, not inside the runner: an unknown name is an authoring
+        # mistake and should say what this machine actually offers.
+        self.context.get_runner(runner_name)
 
         with self._lock:
             agent_id = self.context.reserve_agent()
@@ -116,6 +123,7 @@ class WorkflowAPI:
                 agent_type=resolved.agent_type_name,
                 isolation=resolved.isolation or "shared",
                 model=resolved.model,
+                runner=runner_name,
             )
             self.frame.agents.append(record)
             self._notify()
@@ -142,6 +150,7 @@ class WorkflowAPI:
                     "type": "result",
                     "key": journal_key,
                     "agentId": str(agent_id),
+                    "runner": runner_name,
                     "cached": True,
                     "result": cached,
                 }
@@ -186,6 +195,8 @@ class WorkflowAPI:
             schema=schema,
             agent_type=resolved.agent_type_name,
             isolation=resolved.isolation,
+            runner=runner_name,
+            lane=resolved.lane,
             cwd=self.frame.cwd,
             structured_tool=bool(schema),
             on_start=on_child_start,
@@ -207,6 +218,8 @@ class WorkflowAPI:
                 "type": "started",
                 "key": journal_key,
                 "agentId": str(agent_id),
+                "runner": runner_name,
+                "lane": resolved.lane,
             }
         )
         self._notify()
@@ -214,7 +227,7 @@ class WorkflowAPI:
         accumulated_tokens = 0
         for attempt in range(max_attempts):
             try:
-                with self.context.agent_slot():
+                with self.context.agent_slot(), self.context.runner_slot(runner_name):
                     raw_result = self._run_child(request, record)
                 metadata = raw_result.metadata if isinstance(raw_result, ChildAgentResult) else {}
                 result = raw_result.content if isinstance(raw_result, ChildAgentResult) else raw_result
@@ -232,7 +245,10 @@ class WorkflowAPI:
                     record.structured.update(
                         {
                             "status": "valid",
-                            "mode": "tool",
+                            # "tool" = a schema-constrained tool call (hermes);
+                            # "prompt" = prompt + parse + validate + retry, for
+                            # runners with no native schema surface (pi).
+                            "mode": str(metadata.get("structured_mode") or "tool"),
                             "attempts": int(metadata.get("structured_attempts") or 1),
                             "error": "",
                         }
@@ -247,6 +263,7 @@ class WorkflowAPI:
                         "type": "result",
                         "key": journal_key,
                         "agentId": str(agent_id),
+                        "runner": runner_name,
                         "result": result,
                     }
                 )
@@ -280,6 +297,7 @@ class WorkflowAPI:
                         "type": "error",
                         "key": journal_key,
                         "agentId": str(agent_id),
+                        "runner": runner_name,
                         "error": record.error,
                     }
                 )
@@ -292,7 +310,7 @@ class WorkflowAPI:
         raise ChildAgentError("child agent failed without a result")
 
     def _run_child(self, request: ChildAgentRequest, record: AgentRecord) -> Any:
-        return self.runner.run(request)
+        return self.context.get_runner(request.runner).run(request)
 
     async def parallel(self, thunks: list[Callable[[], Any]]) -> list[Any]:
         self._check_deadline()
@@ -424,6 +442,7 @@ _PUBLIC_AGENT_OPT_KEYS = frozenset(
         "model",
         "isolation",
         "agentType",
+        "runner",
     }
 )
 
@@ -436,7 +455,7 @@ def _validate_agent_opts(opts: dict[str, Any]) -> None:
         "unsupported agent() option(s): "
         + ", ".join(unknown)
         + ". Public workflow agent options are label, phase, schema, model, "
-        "isolation, and agentType. Put tool access in agentType presets or "
+        "isolation, agentType, and runner. Put tool access in agentType presets or "
         "plugin config; provider/runtime, timeout, and retry policy belong in "
         "Hermes/plugin configuration, not workflow scripts."
     )
@@ -466,6 +485,15 @@ def _normalize_agent_model(value: Any) -> str | None:
     return clean
 
 
+def _normalize_runner(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    clean = str(value).strip()
+    if not clean or clean.lower() == "inherit":
+        return None
+    return clean
+
+
 def _normalize_isolation(value: Any) -> str | None:
     if value in (None, ""):
         return None
@@ -482,6 +510,7 @@ def _resolve_agent_spec(
     config: Any,
     structured_output: bool,
     phase_model: str | None = None,
+    default_runner: str = "hermes",
 ) -> ResolvedAgentSpec:
     from ..child.presets import list_agent_types, resolve_agent_type
     from ..child.runner import (
@@ -512,24 +541,47 @@ def _resolve_agent_spec(
         else getattr(agent_type_spec, "model", None)
     )
     _prepare_mcp_tool_registry(config)
-    toolsets = tuple(
+    declared_toolsets = tuple(
         _resolve_child_toolsets(
             config,
             [],
             getattr(agent_type_spec, "toolsets", ()),
-            include_discoverable=not explicit_type,
+            include_discoverable=False,
+        )
+    )
+    toolsets = (
+        declared_toolsets
+        if explicit_type
+        else tuple(
+            _resolve_child_toolsets(
+                config,
+                [],
+                getattr(agent_type_spec, "toolsets", ()),
+                include_discoverable=True,
+            )
         )
     )
     prompt = build_child_system_prompt(
         agent_type_spec,
         structured_output=structured_output,
     )
+    # Precedence: per-call opts["runner"] > agent-type frontmatter > engine
+    # default (applied by the caller, which owns the default name).
+    runner = (
+        _normalize_runner(opts.get("runner"))
+        or _normalize_runner(getattr(agent_type_spec, "runner", None))
+        or default_runner
+    )
+    lane = _normalize_runner(getattr(agent_type_spec, "lane", None))
     return ResolvedAgentSpec(
         requested_agent_type=requested_type,
         agent_type_spec=agent_type_spec,
         model=model or None,
         isolation=explicit_isolation or agent_type_isolation,
+        runner=runner,
+        lane=lane,
         toolsets=toolsets,
+        declared_toolsets=declared_toolsets,
         allowed_tools=tuple(getattr(agent_type_spec, "allowed_tools", ()) or ()),
         disallowed_tools=tuple(getattr(agent_type_spec, "disallowed_tools", ()) or ()),
         system_prompt_hash=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),

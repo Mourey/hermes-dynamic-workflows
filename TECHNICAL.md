@@ -275,6 +275,10 @@ share the cache prefix. The savings depend on the provider (0 for non-cacheable 
 - **Concurrency slots**: one semaphore per run, capped at `concurrency` (default
   `min(16, cpu-2)`, and ≤ `max_concurrency`=16). `parallel()/pipeline()` can submit any
   number of items, but only about slot-many run at once and the rest queue.
+- **Per-runner slots** `runner_concurrency` (default `{"pi": 4, "claude": 2}`): an extra
+  semaphore acquired *inside* the global one, so a heavy subprocess runner cannot fill
+  every slot. A runner with no entry is bounded only by the global ceiling, and no entry
+  can exceed it. Override with `HERMES_DYNAMIC_WORKFLOWS_RUNNER_CONCURRENCY="pi=6"`.
 - **Agent cap** `max_agents` (default 1000): a runaway fallback gate, far above any real
   workflow.
 - **Loop gate**: each `while/for` iteration injects `__wf_tick__()`, which checks for
@@ -287,6 +291,44 @@ share the cache prefix. The savings depend on the provider (0 for non-cacheable 
 Run-level hard stops (user stop, deadline, budget/agent/loop caps) derive from
 `BaseException`, so the script's `except Exception` cannot swallow them; the sandbox also
 forbids `except:` / `except BaseException`.
+
+## Child Runners
+
+`agent()` picks *which executor* runs the child, not just which model:
+
+| runner | what it is | tools | structured output |
+|---|---|---|---|
+| `hermes` (default) | in-process Hermes `AIAgent` | full toolsets + MCP | native `structured_output` tool call |
+| `pi` | the pi coding lane's `run-pi-task.sh` in a subprocess | read/write/edit/grep/find/ls/bash — no web, no MCP, no subagents | prompt + parse + validate + retry |
+
+Selection precedence: `agent(..., {"runner": …})` → the agent type's `runner:`
+frontmatter → the engine default (`hermes`). `"inherit"` means "no opinion" at
+either level. A runner is only registered when it is usable on this machine, so
+an unknown name fails immediately and names the ones that are.
+
+```python
+agent(p, {"agentType": "cheap-builder"})                     # -> pi (declared by the agent type)
+agent(p, {"agentType": "cheap-builder", "runner": "hermes"}) # -> hermes (per-call override)
+```
+
+The pi runner deliberately wraps `run-pi-task.sh` rather than driving `pi`
+directly: pi has no turn cap, no budget cap, and exits 0 even on a failed turn
+under `--mode json`, so the wrapper's turn counter, cost accumulator,
+`agent_end` check, provider degradation and process-group kill are all
+load-bearing. Its one-JSON-object result maps onto `ChildAgentResult`:
+`summary`→`content` (recovered in full from the tee'd event stream, since the
+wrapper truncates `summary` to 500 chars for the board), `total_cost_usd` /
+`providers_tried` / `pi_session_id` / `changed_files` / `tests_run`→`metadata`,
+and `is_error` + `error_class` (`provider-wall | auth | verification_failed |
+spawn_failure | cap_exceeded`)→`ChildAgentError`.
+
+Which lane conf supplies a pi child's model and caps comes from the agent
+type's `lane:` frontmatter (default `builder`); `HERMES_DYNAMIC_WORKFLOWS_PI_LANE`
+overrides the default. `opts["model"]` becomes a dispatch-spec `model:` key,
+which the lane resolver catalog-verifies before any spawn.
+
+Both `runner` and `lane` are part of the resume fingerprint — see the cache
+section below.
 
 ## Permission Governance
 
@@ -352,6 +394,14 @@ scheduling order changes, unchanged calls still hit. When editing the script, tr
 the early, stable `agent()` calls: an early change flows downstream into later prompts and
 reduces reuse, while a late change preserves more of the cache.
 
+The fingerprint covers `runner` and `lane`, so flipping a node from `hermes` to
+`pi` (or between pi lanes) re-runs it instead of replaying the other runner's
+answer. It deliberately does **not** cover MCP/plugin toolsets discovered at
+runtime: discovery is a background thread with a short wait, so including them
+made the same call fingerprint differently on every run and no resume ever hit.
+Only the toolsets an author declared (agent-type frontmatter, or the plugin
+defaults) are cache-relevant.
+
 ## Token Budget
 
 `budget.total` is parsed from a target in the current user message (`+500k`,
@@ -368,7 +418,8 @@ ought to have. Tool inputs / `meta` / config / environment cannot set `total`.
   `.hermes/dynamic-workflows/agents/<name>.{md,yaml,json}` → user
   `~/.hermes/dynamic-workflows/agents/<name>.…` → the plugin's built-in
   `agents/<name>.md`. Markdown supports YAML frontmatter (`model` / `toolsets` /
-  `isolation`, …). Built-in: `explore`, `general-purpose`, `plan`, `verification`.
+  `isolation` / `runner` / `lane`, …). Built-in: `explore`, `general-purpose`, `plan`,
+  `verification`, `cheap-builder` (the worked `runner: pi` example).
 - **worktree**: `agent(isolation="worktree")` runs each subagent in its own git worktree,
   preventing conflicts from concurrent edits to the same checkout. This is workspace
   isolation, not a security sandbox; the worktree is deleted after use by default

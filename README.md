@@ -50,6 +50,8 @@ plugins:
       dynamic_workflows:
         concurrency: 8                # Max concurrent agents (default: min(16, cpu-2))
         max_concurrency: 16           # Hard cap on concurrency
+        runner_concurrency: {pi: 4}   # Per-runner cap, applied inside `concurrency`
+                                      # (subprocess runners are heavier than in-process ones)
         max_agents: 1000              # Max total agents per run (runaway guard)
         workflow_timeout_seconds: 900 # Wall-clock timeout for the whole run (excludes paused time)
         child_timeout_seconds: 300    # Timeout for a single child agent
@@ -89,7 +91,11 @@ return await agent("Synthesize the verified findings:\n" + json.dumps(findings))
 ```
 
 - `agent(prompt, opts)` spawns a child agent; `opts` may include `schema` (enforce
-  structured output), `model`, `agentType`, and `isolation="worktree"`.
+  structured output), `model`, `agentType`, `isolation="worktree"`, and `runner`.
+- `runner` picks *which executor* runs the child: `"hermes"` (default, in-process, full
+  toolsets + MCP) or `"pi"` (the cheap pi coding lane as a subprocess — files and
+  terminal only, model taken from the lane conf). An agent type can declare its own
+  `runner:`/`lane:`; a per-call `runner` beats it.
 - `pipeline` (default, no barrier) / `parallel` (with barrier) handle concurrency;
   `phase`/`log` report progress; `workflow()` runs a named workflow inline; `args` /
   `budget` access the input arguments and the token budget.
@@ -105,6 +111,7 @@ Specify a child agent's type via `agentType` in the script; if omitted, it defau
 | `explore` | Read-only (read_file, search_files, terminal) | Fast codebase exploration; good for locating files and searching keywords |
 | `plan` | Read-only (read_file, search_files, terminal) | Software architecture design; outputs a step-by-step implementation plan |
 | `verification` | web + file + terminal + browser | Verifies implementation correctness; runs build/test/lint to emit PASS/FAIL |
+| `cheap-builder` | file + terminal, on the `pi` runner | Mechanical edits (bulk find-and-replace, config/cron, small single-file fixes) on the cheap pi lane |
 
 Agent types are resolved from three locations in priority order (on a name collision,
 earlier locations override later ones):
@@ -128,7 +135,9 @@ Write the agent's system prompt here to guide its behavior, style, and constrain
 
 `name` and `description` are required; `model` defaults to `inherit` (inherits the
 current session's model); `toolsets` defaults to the global `default_child_toolsets`;
-optional fields also include `allowed_tools`, `disallowed_tools`, and `isolation`.
+optional fields also include `allowed_tools`, `disallowed_tools`, `isolation`, `runner`
+(which executor runs it — `hermes` or `pi`), and `lane` (which pi lane conf supplies the
+model and caps, default `builder`).
 
 At runtime the plugin persists the script and the full execution trace (transcript) of
 every child agent, and injects a `<task-notification>` into the conversation on

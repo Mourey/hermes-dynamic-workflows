@@ -21,6 +21,11 @@ class AgentTypeSpec:
     disallowed_tools: tuple[str, ...] = ()
     model: str | None = None
     isolation: str | None = None
+    # Which child runner executes this agent type ("hermes", "pi", ...) and, for
+    # subprocess runners, which lane conf supplies its model/tool policy. Both
+    # are defaults — a per-call opts["runner"] wins.
+    runner: str | None = None
+    lane: str | None = None
 
 
 def resolve_agent_type(name: str | None, *, cwd: str | None = None) -> AgentTypeSpec | None:
@@ -120,6 +125,8 @@ def _load_markdown_agent_type(name: str, path: Path) -> AgentTypeSpec:
         disallowed_tools=_as_tuple(frontmatter.get("disallowed_tools")),
         model=_as_optional_str(frontmatter.get("model")),
         isolation=_as_optional_str(frontmatter.get("isolation")),
+        runner=_as_optional_str(frontmatter.get("runner")),
+        lane=_as_optional_str(frontmatter.get("lane")),
     )
 
 
@@ -146,6 +153,8 @@ def _load_structured_agent_type(name: str, path: Path, data: Any) -> AgentTypeSp
         disallowed_tools=_as_tuple(data.get("disallowed_tools")),
         model=_as_optional_str(data.get("model")),
         isolation=_as_optional_str(data.get("isolation")),
+        runner=_as_optional_str(data.get("runner")),
+        lane=_as_optional_str(data.get("lane")),
     )
 
 

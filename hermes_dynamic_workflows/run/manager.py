@@ -534,6 +534,7 @@ class WorkflowRunManager:
     ) -> None:
         try:
             from ..child.runner import HermesChildAgentRunner
+            from ..child.runners import build_runner_registry
 
             runner_kwargs = {
                 "session_context": session_context,
@@ -542,7 +543,10 @@ class WorkflowRunManager:
             }
             if managed.approval_callback is not None:
                 runner_kwargs["approval_callback"] = managed.approval_callback
+            # child_runner stays the Hermes runner: stop/skip control paths call
+            # its interrupt_all()/skip_child(), which only it implements.
             managed.child_runner = HermesChildAgentRunner(config, **runner_kwargs)
+            child_runners = build_runner_registry(config, managed.child_runner)
             self._update(
                 managed,
                 status="paused" if managed.pause_gate.is_paused else "running",
@@ -555,6 +559,7 @@ class WorkflowRunManager:
                     cwd=cwd or os.environ.get("TERMINAL_CWD") or os.getcwd(),
                     config=config,
                     child_runner=managed.child_runner,
+                    child_runners=child_runners,
                     stop_event=managed.stop_event,
                     pause_gate=managed.pause_gate,
                     resume_cache=resume_cache,

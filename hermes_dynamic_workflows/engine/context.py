@@ -14,6 +14,7 @@ from ..core.config import PluginConfig
 from ..core.errors import (
     WorkflowDeadlineExceeded,
     WorkflowLimitExceeded,
+    WorkflowRuntimeError,
     WorkflowStopped,
 )
 from ..core.types import ChildAgentRunner, WorkflowFrame, WorkflowState, normalize_phase_specs
@@ -68,7 +69,7 @@ class PauseGate:
 @dataclass
 class WorkflowExecutionContext:
     config: PluginConfig
-    runner: ChildAgentRunner
+    runners: dict[str, ChildAgentRunner]
     stop_event: threading.Event
     pause_gate: PauseGate
     resume_cache: ResumeCache
@@ -79,9 +80,11 @@ class WorkflowExecutionContext:
     plugin_context: Any = None
     token_budget_total: int | None = None
     store: Any = None
+    default_runner: str = "hermes"
     state: WorkflowState = field(init=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
     _agent_slots: threading.BoundedSemaphore = field(init=False)
+    _runner_slots: dict[str, threading.BoundedSemaphore] = field(init=False)
     _agent_counter: int = 0
     _frame_counter: int = 0
     _agent_count: int = 0
@@ -92,6 +95,47 @@ class WorkflowExecutionContext:
         self.state = WorkflowState(self.root)
         concurrency = min(self.config.concurrency, self.config.max_concurrency)
         self._agent_slots = threading.BoundedSemaphore(max(1, concurrency))
+        # Per-runner caps never exceed the global ceiling — a larger number here
+        # would be a no-op and reads as a promise the engine cannot keep.
+        self._runner_slots = {
+            name: threading.BoundedSemaphore(max(1, min(int(limit), concurrency)))
+            for name, limit in (self.config.runner_concurrency or {}).items()
+            if str(name).strip()
+        }
+
+    @property
+    def runner(self) -> ChildAgentRunner:
+        """The default runner. Kept for callers that predate the registry."""
+        return self.get_runner(None)
+
+    def get_runner(self, name: str | None) -> ChildAgentRunner:
+        wanted = str(name or self.default_runner).strip() or self.default_runner
+        runner = self.runners.get(wanted)
+        if runner is None:
+            available = ", ".join(sorted(self.runners)) or "none"
+            raise WorkflowRuntimeError(
+                f"unknown runner {wanted!r}. Available runners: {available}"
+            )
+        return runner
+
+    @contextmanager
+    def runner_slot(self, name: str | None) -> Iterator[None]:
+        """Per-runner cap, acquired *inside* the global agent slot.
+
+        Nesting order is always global-then-runner, so there is no acquisition
+        cycle to deadlock on.
+        """
+        wanted = str(name or self.default_runner).strip() or self.default_runner
+        slot = self._runner_slots.get(wanted)
+        if slot is None:
+            yield
+            return
+        slot.acquire()
+        try:
+            self.check_runtime()
+            yield
+        finally:
+            slot.release()
 
     @property
     def spent_tokens(self) -> int:

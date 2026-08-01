@@ -206,10 +206,19 @@ class ResolvedAgentSpec:
     model: str | None = None
     isolation: str | None = None
     toolsets: tuple[str, ...] = ()
+    # The toolsets the author actually declared (agent-type frontmatter or the
+    # plugin defaults), without the ambient MCP/plugin toolsets appended by
+    # discovery. Only this subset is cache-relevant — see cache_inputs().
+    declared_toolsets: tuple[str, ...] = ()
     allowed_tools: tuple[str, ...] = ()
     disallowed_tools: tuple[str, ...] = ()
     system_prompt_hash: str = ""
     workspace: str = ""
+    # Which child runner executes this call ("hermes", "pi", ...) and, for
+    # subprocess runners that key their model/tool config off a lane conf, which
+    # lane. Both participate in cache_inputs() — see below.
+    runner: str | None = None
+    lane: str | None = None
 
     @property
     def agent_type_name(self) -> str | None:
@@ -217,15 +226,27 @@ class ResolvedAgentSpec:
         return str(value) if value else self.requested_agent_type
 
     def cache_inputs(self) -> dict[str, Any]:
+        # runner/lane are load-bearing here, not cosmetic: the resume cache is
+        # content-addressed on (prompt, these inputs). Omitting them would make a
+        # node flipped from hermes to pi (or from one pi lane to another) hit the
+        # OLD runner's cached result on resume — a silent wrong answer rather
+        # than a re-run. Adding the keys invalidates pre-existing agentCache
+        # entries, which is correct.
+        # Declared toolsets, never the discovered ones: MCP discovery runs in a
+        # background thread with a short wait, so the *same* call resolves to a
+        # different toolset list from run to run (and even between two calls in
+        # one run). Feeding that into the fingerprint made every resume miss.
         return {
             "model": self.model,
             "isolation": self.isolation,
-            "toolsets": list(self.toolsets),
+            "toolsets": list(self.declared_toolsets or self.toolsets),
             "allowedTools": list(self.allowed_tools),
             "disallowedTools": list(self.disallowed_tools),
             "agentType": self.agent_type_name,
             "systemPromptHash": self.system_prompt_hash,
             "workspace": self.workspace,
+            "runner": self.runner,
+            "lane": self.lane,
         }
 
 
@@ -240,6 +261,8 @@ class ChildAgentRequest:
     schema: dict[str, Any] | None = None
     agent_type: str | None = None
     isolation: str | None = None
+    runner: str | None = None
+    lane: str | None = None
     cwd: str | None = None
     request_overrides: dict[str, Any] | None = None
     structured_tool: bool = False
