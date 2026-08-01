@@ -11,10 +11,19 @@ def default_concurrency() -> int:
     return min(16, max(1, (os.cpu_count() or 4) - 2))
 
 
+def default_runner_concurrency() -> dict[str, int]:
+    # Per-runner caps sit *inside* the global `concurrency` ceiling. A subprocess
+    # child (pi, claude) is far heavier than an in-process AIAgent: ten pending
+    # awaits and ten spawned CLI processes are very different machine loads.
+    # Runners not listed here are bounded only by the global ceiling.
+    return {"pi": 4, "claude": 2}
+
+
 @dataclass(frozen=True)
 class PluginConfig:
     concurrency: int = field(default_factory=default_concurrency)
     max_concurrency: int = 16
+    runner_concurrency: dict[str, int] = field(default_factory=default_runner_concurrency)
     max_agents: int = 1000
     # Runaway-loop backstop: caps total `while`-loop iterations across the run.
     # Generous so legitimate loop-until-budget/dry never trips it; the wall-clock
@@ -115,6 +124,36 @@ def _as_str_tuple(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
     return cleaned or default
 
 
+def _as_runner_concurrency(value: Any, default: dict[str, int]) -> dict[str, int]:
+    """Parse per-runner caps from a mapping or a "pi=4,claude=2" string.
+
+    Unparseable entries are dropped rather than raising: a typo in config should
+    fall back to "bounded only by the global ceiling", not break every launch.
+    """
+    if isinstance(value, dict):
+        items = list(value.items())
+    elif isinstance(value, str):
+        items = []
+        for part in value.split(","):
+            name, sep, raw = part.partition("=")
+            if sep:
+                items.append((name, raw))
+    else:
+        return dict(default)
+
+    merged = dict(default)
+    for name, raw in items:
+        clean = str(name).strip()
+        if not clean:
+            continue
+        try:
+            parsed = int(str(raw).strip())
+        except (TypeError, ValueError):
+            continue
+        merged[clean] = max(1, min(32, parsed))
+    return merged
+
+
 def _as_mode(value: Any, default: str, allowed: set[str]) -> str:
     clean = str(value or "").strip().lower()
     return clean if clean in allowed else default
@@ -154,6 +193,13 @@ def load_config() -> PluginConfig:
     return PluginConfig(
         concurrency=min(concurrency, max_concurrency),
         max_concurrency=max_concurrency,
+        runner_concurrency=_as_runner_concurrency(
+            os.getenv(
+                "HERMES_DYNAMIC_WORKFLOWS_RUNNER_CONCURRENCY",
+                raw.get("runner_concurrency"),
+            ),
+            default.runner_concurrency,
+        ),
         max_agents=_as_int(raw.get("max_agents"), default.max_agents, minimum=1, maximum=1000),
         max_loop_iterations=_as_int(
             os.getenv(

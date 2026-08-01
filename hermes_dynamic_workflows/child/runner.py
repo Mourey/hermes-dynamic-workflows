@@ -640,10 +640,18 @@ def _apply_agent_type_defaults(
     model = request.model or agent_type.model
     if model and model.strip().lower() == "inherit":
         model = None
+    runner = request.runner or getattr(agent_type, "runner", None)
+    if runner and runner.strip().lower() == "inherit":
+        runner = None
+    lane = request.lane or getattr(agent_type, "lane", None)
+    if lane and lane.strip().lower() == "inherit":
+        lane = None
     return replace(
         request,
         model=model,
         isolation=request.isolation or agent_type.isolation,
+        runner=runner,
+        lane=lane,
     )
 
 
@@ -1181,7 +1189,9 @@ def _child_metadata(
     completion_tokens = _int_attr(child, "session_completion_tokens")
     reasoning_tokens = _int_attr(child, "session_reasoning_tokens")
     metadata = {
-        "runner": "standalone",
+        # Registry name, matching agent(..., {"runner": ...}). Was "standalone"
+        # before the registry existed, when there was only one runner to name.
+        "runner": "hermes",
         "task_id": lease.task_id,
         "session_id": lease.task_id,
         "hermes_session_id": lease.task_id,
