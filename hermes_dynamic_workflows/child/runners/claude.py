@@ -221,6 +221,10 @@ def _claude_metadata(
     metadata.update(
         {
             "claude_session_id": payload.get("claude_session_id"),
+            # Also under the generic key: _apply_child_metadata reads
+            # `session_id` to populate the agent record, so without this the
+            # resumable session never reaches the run record for a lane child.
+            "session_id": payload.get("claude_session_id"),
             "claude_log_path": str(log_path),
         }
     )

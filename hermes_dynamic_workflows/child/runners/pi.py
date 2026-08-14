@@ -218,6 +218,10 @@ def _pi_metadata(
     metadata.update(
         {
             "pi_session_id": payload.get("pi_session_id"),
+            # Also under the generic key: _apply_child_metadata reads
+            # `session_id` to populate the agent record, so without this the
+            # resumable session never reaches the run record for a lane child.
+            "session_id": payload.get("pi_session_id"),
             "providers_tried": payload.get("providers_tried") or [],
             "budget_exceeded": bool(payload.get("budget_exceeded")),
             "walled_until": payload.get("walled_until"),

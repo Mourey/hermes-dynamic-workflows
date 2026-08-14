@@ -636,6 +636,9 @@ class ChildAgentResultShapeTests(unittest.TestCase):
         self.assertEqual(metadata["runner"], "pi")
         self.assertEqual(metadata["lane"], "builder")
         self.assertEqual(metadata["pi_session_id"], "sess-9")
+        self.assertEqual(
+            metadata["session_id"], "sess-9", "the record's session field reads `session_id`"
+        )
         self.assertEqual(metadata["total_cost_usd"], 0.0123)
         self.assertEqual(metadata["model"], "deepseek/deepseek-v4-flash")
         self.assertEqual(
@@ -737,6 +740,9 @@ class ClaudeAdapterUnitTests(unittest.TestCase):
         self.assertEqual(metadata["runner"], "claude")
         self.assertEqual(metadata["lane"], "claude-worker")
         self.assertEqual(metadata["claude_session_id"], "sess-c9")
+        self.assertEqual(
+            metadata["session_id"], "sess-c9", "the record's session field reads `session_id`"
+        )
         self.assertEqual(metadata["total_cost_usd"], 0.42)
         self.assertEqual(metadata["model"], "opus")
         self.assertEqual(metadata["structured_output"], {"ok": True})
