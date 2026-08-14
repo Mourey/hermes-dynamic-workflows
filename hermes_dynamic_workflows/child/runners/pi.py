@@ -40,7 +40,7 @@ from ...core.errors import ChildAgentError, WorkflowTimeout
 from ...core.types import ChildAgentRequest, ChildAgentResult, ChildAgentRunner
 
 RUNNER_NAME = "pi"
-DEFAULT_LANE = "builder"
+DEFAULT_LANE = "default"
 WRAPPER_NAME = "run-pi-task.sh"
 
 # error_class values the wrapper emits (unified enum, shared with the claude
@@ -55,47 +55,63 @@ def default_lane() -> str:
     return os.getenv("HERMES_DYNAMIC_WORKFLOWS_PI_LANE", "").strip() or DEFAULT_LANE
 
 
+def hermes_home() -> Path:
+    return Path(os.getenv("HERMES_ROOT", "").strip() or Path.home() / ".hermes")
+
+
 def profiles_root() -> Path:
     override = os.getenv("HERMES_DYNAMIC_WORKFLOWS_PI_PROFILES_ROOT", "").strip()
     if override:
         return Path(override).expanduser()
-    return Path(os.getenv("HERMES_ROOT", "").strip() or Path.home() / ".hermes") / "profiles"
+    return hermes_home() / "profiles"
+
+
+def _search_roots() -> list[Path]:
+    """Hermes homes that may ship a lane wrapper, base first.
+
+    The base home is the one that matters now — there is a single hermes home
+    and its profile name is ``default``. The per-profile roots are still
+    searched so a box that has not converged yet keeps working; when no
+    profiles exist the glob simply matches nothing.
+    """
+    roots = [hermes_home()]
+    profiles = profiles_root()
+    if profiles.is_dir():
+        roots.extend(sorted(p for p in profiles.iterdir() if p.is_dir()))
+    return roots
 
 
 def find_wrapper(lane: str) -> Path | None:
     """Locate the run-pi-task.sh whose config dir carries ``lanes/<lane>.conf``.
 
-    The wrapper is installed per lane profile
-    (``~/.hermes/profiles/<lane>/skills/devops/<x>-code-lane/scripts/``) and
-    resolves its lane conf relative to its own location, so the copy we pick
-    must be one that actually ships the requested lane.
+    The wrapper resolves its lane conf relative to its own location, so the copy
+    we pick must be one that actually ships the requested lane. Installed at
+    ``<hermes home>/skills/devops/pi-code-lane/scripts/`` since the profiles
+    were removed.
     """
     override = os.getenv("HERMES_DYNAMIC_WORKFLOWS_PI_TASK_SCRIPT", "").strip()
     if override:
         candidate = Path(override).expanduser()
         return candidate if candidate.is_file() else None
 
-    root = profiles_root()
-    ordered: list[Path] = []
-    ordered.extend(sorted((root / lane).glob(f"skills/*/*/scripts/{WRAPPER_NAME}")))
-    ordered.extend(sorted(root.glob(f"*/skills/*/*/scripts/{WRAPPER_NAME}")))
     seen: set[Path] = set()
-    for candidate in ordered:
-        if candidate in seen or not candidate.is_file():
-            continue
-        seen.add(candidate)
-        if (candidate.parent.parent / "config" / "lanes" / f"{lane}.conf").is_file():
-            return candidate
+    for root in _search_roots():
+        for candidate in sorted(root.glob(f"skills/*/*/scripts/{WRAPPER_NAME}")):
+            if candidate in seen or not candidate.is_file():
+                continue
+            seen.add(candidate)
+            if (candidate.parent.parent / "config" / "lanes" / f"{lane}.conf").is_file():
+                return candidate
     return None
 
 
 def available_lanes() -> list[str]:
-    root = profiles_root()
     lanes: set[str] = set()
-    for wrapper in root.glob(f"*/skills/*/*/scripts/{WRAPPER_NAME}"):
-        conf_dir = wrapper.parent.parent / "config" / "lanes"
-        for conf in conf_dir.glob("*.conf"):
-            lanes.add(conf.stem)
+    for root in _search_roots():
+        for wrapper in root.glob(f"skills/*/*/scripts/{WRAPPER_NAME}"):
+            conf_dir = wrapper.parent.parent / "config" / "lanes"
+            for conf in conf_dir.glob("*.conf"):
+                lanes.add(conf.stem)
     return sorted(lanes)
 
 

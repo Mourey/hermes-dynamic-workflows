@@ -2,7 +2,7 @@
 name: cheap-builder
 description: "Mechanical code and config edits run on the cheap pi coding lane instead of an in-process Hermes child. Use for bulk find-and-replace, config/cron/symlink edits, small single-file fixes, and other work where the instructions are exact and the judgment required is low. Not for design decisions, ambiguous specs, or anything needing web/MCP tools — pi lanes have neither."
 runner: pi
-lane: builder
+lane: default
 isolation: worktree
 toolsets: [file, terminal]
 ---
