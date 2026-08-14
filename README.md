@@ -50,8 +50,7 @@ plugins:
       dynamic_workflows:
         concurrency: 8                # Max concurrent agents (default: min(16, cpu-2))
         max_concurrency: 16           # Hard cap on concurrency
-        runner_concurrency: {pi: 4, claude: 2}
-                                      # Per-runner cap, applied inside `concurrency`
+        runner_concurrency: {pi: 4}   # Per-runner cap, applied inside `concurrency`
                                       # (subprocess runners are heavier than in-process ones)
         max_agents: 1000              # Max total agents per run (runaway guard)
         workflow_timeout_seconds: 900 # Wall-clock timeout for the whole run (excludes paused time)
@@ -63,14 +62,6 @@ plugins:
         keep_worktrees: false         # Whether to keep each agent's git worktree (auto-cleaned by default)
         allow_model_override: true    # Whether agent(model=...) may override the model
         require_launch_approval: true # Require confirmation before a top-level workflow launches (denied if nobody is online)
-        lead_profiles: []             # Profiles whose KANBAN-DISPATCHED sessions may launch
-                                      # unattended. A dispatched worker is headless, so no
-                                      # approval channel can answer for it. Both conditions
-                                      # are required: the session's HERMES_PROFILE is listed
-                                      # here AND HERMES_KANBAN_TASK is set (only the
-                                      # dispatcher sets it), so activating the same profile
-                                      # by hand is still gated. Prefer this over turning
-                                      # require_launch_approval off, which un-gates everything.
         child_approval_policy: inherit # Child agent approval policy: inherit|smart|deny|approve|ask
         ask_fallback: smart           # Fallback when "ask" has no one to reach: smart|deny|approve
         notify_on_complete: true      # Notify the originating CLI or gateway session on completion
@@ -102,10 +93,9 @@ return await agent("Synthesize the verified findings:\n" + json.dumps(findings))
 - `agent(prompt, opts)` spawns a child agent; `opts` may include `schema` (enforce
   structured output), `model`, `agentType`, `isolation="worktree"`, and `runner`.
 - `runner` picks *which executor* runs the child: `"hermes"` (default, in-process, full
-  toolsets + MCP), `"pi"` (the cheap pi coding lane as a subprocess — files and
-  terminal only, model taken from the lane conf), or `"claude"` (the deep Claude Code
-  lane as a subprocess — MCP and its own subagents, and the most expensive per node).
-  An agent type can declare its own `runner:`/`lane:`; a per-call `runner` beats it.
+  toolsets + MCP) or `"pi"` (the cheap pi coding lane as a subprocess — files and
+  terminal only, model taken from the lane conf). An agent type can declare its own
+  `runner:`/`lane:`; a per-call `runner` beats it.
 - `pipeline` (default, no barrier) / `parallel` (with barrier) handle concurrency;
   `phase`/`log` report progress; `workflow()` runs a named workflow inline; `args` /
   `budget` access the input arguments and the token budget.

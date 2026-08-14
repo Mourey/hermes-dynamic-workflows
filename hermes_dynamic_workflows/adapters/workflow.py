@@ -134,7 +134,7 @@ _DESCRIPTION = (
     'The `meta` dict must be a PURE LITERAL — no variables, function calls, dict unpacking, or f-string interpolation. Required fields: `name`, `description`. Optional: `whenToUse` (shown in the workflow list), `phases`. Use the SAME phase titles in meta["phases"] as in phase() calls — titles are matched exactly; a phase() call with no matching meta entry just gets its own progress group. Add `model` to a phase entry when that phase uses a specific model override.\n'
     '\n'
     'Script body hooks:\n'
-    '- agent(prompt: str, opts: dict | None = None) -> Awaitable[Any] — spawn a subagent. Use `await agent(...)` for direct calls. Inside parallel()/pipeline() callbacks, return the awaitable; the helper will await it. Supported opts are `label`, `phase`, `schema`, `model`, `isolation`, `agentType`, and `runner`. Without schema, returns its final text as a string. With schema (a JSON Schema), the subagent is forced to call the `structured_output` tool and agent() returns the validated object — no parsing needed. Returns None if the user skips the agent mid-run (filter with `if x is not None`). opts["label"] overrides the display label. opts["phase"] explicitly assigns this agent to a progress group (use this inside pipeline()/parallel() stages to avoid races on the global phase() state — same phase string → same group box). opts["model"] overrides the model for this agent call. Default to omitting it — the agent inherits the resolved session model, which is almost always correct. Only set it when you\'re highly confident a different tier fits the task; when unsure, omit. opts["isolation"]: "worktree" runs the agent in a fresh git worktree — EXPENSIVE (~200-500ms setup + disk per agent), use ONLY when agents mutate files in parallel and would otherwise conflict; the worktree is auto-removed if unchanged. opts["agentType"] uses a custom subagent type (e.g. "explore", "verification") instead of the default workflow subagent(general-purpose) — resolved from workflow agent files; composes with schema (the custom agent\'s system prompt gets a structured_output instruction appended). opts["runner"] picks which child runner executes the call ("hermes" in-process, "pi" as a cheap coding-lane subprocess, "claude" as the deep coding-lane subprocess) — omit it to use the agent type\'s declared runner, or the default ("hermes"). Mixing them in one workflow is the point: hand a node to "claude" where judgment or breadth is the bottleneck and the routine edits to "pi". See the runner list below for what this machine offers.\n'
+    '- agent(prompt: str, opts: dict | None = None) -> Awaitable[Any] — spawn a subagent. Use `await agent(...)` for direct calls. Inside parallel()/pipeline() callbacks, return the awaitable; the helper will await it. Supported opts are `label`, `phase`, `schema`, `model`, `isolation`, `agentType`, and `runner`. Without schema, returns its final text as a string. With schema (a JSON Schema), the subagent is forced to call the `structured_output` tool and agent() returns the validated object — no parsing needed. Returns None if the user skips the agent mid-run (filter with `if x is not None`). opts["label"] overrides the display label. opts["phase"] explicitly assigns this agent to a progress group (use this inside pipeline()/parallel() stages to avoid races on the global phase() state — same phase string → same group box). opts["model"] overrides the model for this agent call. Default to omitting it — the agent inherits the resolved session model, which is almost always correct. Only set it when you\'re highly confident a different tier fits the task; when unsure, omit. opts["isolation"]: "worktree" runs the agent in a fresh git worktree — EXPENSIVE (~200-500ms setup + disk per agent), use ONLY when agents mutate files in parallel and would otherwise conflict; the worktree is auto-removed if unchanged. opts["agentType"] uses a custom subagent type (e.g. "explore", "verification") instead of the default workflow subagent(general-purpose) — resolved from workflow agent files; composes with schema (the custom agent\'s system prompt gets a structured_output instruction appended). opts["runner"] picks which child runner executes the call ("hermes" in-process, "pi" as a cheap coding-lane subprocess) — omit it to use the agent type\'s declared runner, or the default ("hermes"). See the runner list below for what this machine offers.\n'
     '- pipeline(items, stage1, stage2, ...) -> Awaitable[list[Any]] — run each item through all stages independently, NO barrier between stages. Call it with `await`. Item A can be in stage 3 while item B is still in stage 1. This is the DEFAULT for multi-stage work. Wall-clock = slowest single-item chain, not sum-of-slowest-per-stage. Every stage callback receives (prev_result, original_item, index) — use original_item/index in later stages to label work without threading context through stage 1\'s return value. A stage that raises drops that item to `None` and skips its remaining stages.\n'
     '- parallel(thunks: list[Callable[[], Awaitable[Any] | Any]]) -> Awaitable[list[Any]] — run tasks concurrently. Call it with `await`. This is a BARRIER: awaits all thunks before returning. A thunk that raises (or whose agent errors) resolves to `None` in the result list — the call itself never raises for per-item failures, so filter out `None` values before using the results. Use ONLY when you genuinely need all results together.\n'
     '- log(message: str) -> None — emit a progress message to the user (shown as a narrator line above the progress tree)\n'
@@ -296,14 +296,16 @@ def get_dynamic_workflow_schema(*, cwd: str | None = None) -> dict[str, Any]:
 
 def _available_runners_section() -> str:
     """Advertise the child runners this machine can actually dispatch to."""
+    try:
+        from ..child.runners.pi import available_lanes, pi_runner_available
+    except Exception:
+        return ""
     lines = [
         "Available child runners for agent(prompt, {\"runner\": ...}):",
         "- hermes: in-process Hermes AIAgent — full toolsets, MCP, native "
         "structured output. The default; omit `runner` to get it.",
     ]
     try:
-        from ..child.runners.pi import available_lanes, pi_runner_available
-
         if pi_runner_available():
             lanes = ", ".join(available_lanes()) or "builder"
             lines.append(
@@ -311,24 +313,6 @@ def _available_runners_section() -> str:
                 "only, no web, no MCP, no nested subagents. The model comes "
                 "from the lane conf unless opts[\"model\"] names one in pi's "
                 f"catalog. Lanes on this machine: {lanes}."
-            )
-    except Exception:
-        pass
-    try:
-        from ..child.runners.claude import (
-            available_lanes as claude_lanes,
-            claude_runner_available,
-        )
-
-        if claude_runner_available():
-            lanes = ", ".join(claude_lanes()) or "claude-worker"
-            lines.append(
-                "- claude: Claude Code coding lane in a subprocess — the deep "
-                "lane, with MCP and its own subagents, and the most expensive "
-                "per node. Use it where judgment or breadth is the bottleneck "
-                "and leave routine edits to pi. The model comes from the lane "
-                "conf unless opts[\"model\"] names one. Lanes on this machine: "
-                f"{lanes}."
             )
     except Exception:
         pass
