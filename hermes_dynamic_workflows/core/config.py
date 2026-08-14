@@ -56,6 +56,16 @@ class PluginConfig:
     # (or HERMES_DYNAMIC_WORKFLOWS_REQUIRE_LAUNCH_APPROVAL=0) for automation.
     # Only top-level launches are gated; nested workflow() calls inherit the parent run.
     require_launch_approval: bool = True
+    # Profiles whose BOARD-DISPATCHED sessions may launch a workflow with no
+    # human in the loop. A dispatched Lead is headless by definition, so none of
+    # the approval channels above can ever answer for it — and switching
+    # require_launch_approval off to fix that would also un-gate every
+    # interactive session on the box, which is the failure mode the gate was
+    # written for. This is the narrow carve-out instead: a session qualifies
+    # only when it runs under a profile named here AND the kanban dispatcher
+    # owns it (see _sanctioned_lead_launch in run/manager.py). Empty by default
+    # — the carve-out does not exist until an operator names a profile.
+    lead_profiles: tuple[str, ...] = ()
     # What a child agent does when Hermes' approval engine flags a command and
     # no human is present to approve it. The engine itself (hardline blocks,
     # permanent allowlist, yolo, smart mode) still runs upstream regardless;
@@ -247,6 +257,10 @@ def load_config() -> PluginConfig:
         require_launch_approval=_as_bool(
             os.getenv("HERMES_DYNAMIC_WORKFLOWS_REQUIRE_LAUNCH_APPROVAL", raw.get("require_launch_approval")),
             default.require_launch_approval,
+        ),
+        lead_profiles=_as_str_tuple(
+            os.getenv("HERMES_DYNAMIC_WORKFLOWS_LEAD_PROFILES", raw.get("lead_profiles")),
+            default.lead_profiles,
         ),
         child_approval_policy=_as_mode(
             os.getenv(

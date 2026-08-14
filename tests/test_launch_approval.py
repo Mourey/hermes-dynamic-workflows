@@ -134,6 +134,94 @@ class LaunchApprovalDecisionTests(unittest.TestCase):
         self.assertFalse(approved)
         self.assertIn("no interactive channel", reason)
 
+    def test_headless_denial_names_the_lead_carve_out(self):
+        """The remedy an operator should reach for is the narrow one, not the global one."""
+        env = {k: v for k, v in os.environ.items() if k != "HERMES_INTERACTIVE"}
+        with fake_approval(gateway=False), patch.dict(os.environ, env, clear=True):
+            _, reason = _approve_launch(META, PluginConfig(), None)
+        self.assertIn("lead_profiles", reason)
+
+
+def _dispatched(profile="claude-worker", task="t_lead_1", **extra):
+    """The env a kanban-dispatched worker actually runs under (kanban_db.py)."""
+    env = {"HERMES_PROFILE": profile, "HERMES_KANBAN_TASK": task}
+    env.update(extra)
+    return env
+
+
+class SanctionedLeadLaunchTests(unittest.TestCase):
+    """Spec 019 §12.1 PHASE A: a dispatched Lead can launch; nothing else gains."""
+
+    def test_lead_profiles_is_empty_by_default(self):
+        self.assertEqual(PluginConfig().lead_profiles, ())
+
+    def test_dispatched_lead_launches_unattended(self):
+        cfg = PluginConfig(lead_profiles=("claude-worker",))
+        with patch.dict(os.environ, _dispatched(), clear=True):
+            approved, detail = _approve_launch(META, cfg, None)
+        self.assertTrue(approved)
+        self.assertEqual(detail, "sanctioned-lead")
+
+    def test_profile_match_is_case_insensitive(self):
+        cfg = PluginConfig(lead_profiles=("Claude-Worker",))
+        with patch.dict(os.environ, _dispatched(profile="claude-worker"), clear=True):
+            approved, _ = _approve_launch(META, cfg, None)
+        self.assertTrue(approved)
+
+    def test_interactive_session_on_the_same_profile_is_not_sanctioned(self):
+        """No kanban task -> a human activated the profile by hand -> still gated."""
+        cfg = PluginConfig(lead_profiles=("claude-worker",))
+        env = _dispatched()
+        del env["HERMES_KANBAN_TASK"]
+        with fake_approval(gateway=False), patch.dict(os.environ, env, clear=True):
+            approved, reason = _approve_launch(META, cfg, None)
+        self.assertFalse(approved)
+        self.assertIn("no interactive channel", reason)
+
+    def test_dispatched_worker_on_an_unlisted_profile_is_not_sanctioned(self):
+        cfg = PluginConfig(lead_profiles=("claude-worker",))
+        with fake_approval(gateway=False), patch.dict(
+            os.environ, _dispatched(profile="builder-heavy"), clear=True
+        ):
+            approved, reason = _approve_launch(META, cfg, None)
+        self.assertFalse(approved)
+        self.assertIn("no interactive channel", reason)
+
+    def test_empty_allowlist_sanctions_nobody(self):
+        with fake_approval(gateway=False), patch.dict(os.environ, _dispatched(), clear=True):
+            approved, _ = _approve_launch(META, PluginConfig(), None)
+        self.assertFalse(approved)
+
+    def test_blank_entries_do_not_become_a_wildcard(self):
+        cfg = PluginConfig(lead_profiles=("", "   "))
+        with fake_approval(gateway=False), patch.dict(
+            os.environ, _dispatched(profile=""), clear=True
+        ):
+            approved, _ = _approve_launch(META, cfg, None)
+        self.assertFalse(approved)
+
+    def test_sanction_is_checked_before_any_approval_channel(self):
+        """A dispatched Lead must not block on a gateway prompt no one can tap."""
+        cfg = PluginConfig(lead_profiles=("claude-worker",))
+        with fake_approval(gateway=True, gateway_choice="deny"), patch.dict(
+            os.environ, _dispatched(), clear=True
+        ):
+            approved, detail = _approve_launch(META, cfg, None)
+        self.assertTrue(approved)
+        self.assertEqual(detail, "sanctioned-lead")
+
+
+class LeadProfilesConfigTests(unittest.TestCase):
+    def test_env_var_parses_the_comma_form(self):
+        from hermes_dynamic_workflows.core.config import load_config
+
+        with patch.dict(
+            os.environ,
+            {"HERMES_DYNAMIC_WORKFLOWS_LEAD_PROFILES": "claude-worker, lead"},
+            clear=False,
+        ):
+            self.assertEqual(load_config().lead_profiles, ("claude-worker", "lead"))
+
 
 if __name__ == "__main__":
     unittest.main()

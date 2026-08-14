@@ -134,10 +134,12 @@ class WorkflowRunManager:
                 f'Stop it first with task_stop({{"task_id":"{active_task_id}"}}) '
                 "before resuming."
             )
-        approved, reason = (True, "") if launch_approved else _approve_launch(meta, config, plugin_context)
+        approved, launch_detail = (
+            (True, "pre-approved") if launch_approved else _approve_launch(meta, config, plugin_context)
+        )
         if not approved:
             raise WorkflowLaunchDenied(
-                f'Workflow "{meta.get("name") or "workflow"}" was not launched: {reason}. '
+                f'Workflow "{meta.get("name") or "workflow"}" was not launched: {launch_detail}. '
                 "Do not retry; tell the user it needs their approval."
             )
         run_id = new_run_id()
@@ -195,6 +197,12 @@ class WorkflowRunManager:
             "cwd": cwd_value,
             "workflowSessionId": workflow_session_id,
             "controlOwner": self.control_owner if self._control_listener is not None else None,
+            # Which authority let this run start (gateway / cli / sanctioned-lead
+            # / pre-approved / approval-not-required). A run nobody watched is
+            # the one whose provenance matters most, so it is recorded rather
+            # than inferred from config that may have changed since.
+            "launchAuthority": launch_detail,
+            "kanbanTaskId": (os.environ.get("HERMES_KANBAN_TASK") or "").strip() or None,
             "scriptPath": str(saved_path),
             "transcriptDir": str(transcript_dir),
             "journalFile": str(journal_path),
@@ -904,16 +912,50 @@ def _workflow_approval_session_key(
     )
 
 
+def _sanctioned_lead_launch(config: PluginConfig) -> bool:
+    """True when a board-dispatched Lead is allowed to launch unattended.
+
+    Two conditions, BOTH required, and both set by the kanban dispatcher and by
+    nothing else — it exports ``HERMES_PROFILE`` and ``HERMES_KANBAN_TASK`` onto
+    the worker it spawns (``kanban_db.py``, the ``hermes -p <profile> --cli``
+    subprocess):
+
+    * the session runs under a profile the operator listed in ``lead_profiles``;
+    * a kanban task owns the session.
+
+    The second condition is what keeps this from being a global relaxation. An
+    operator who activates the same profile by hand has no ``HERMES_KANBAN_TASK``
+    and still gets the normal prompt, so naming a profile here grants nothing
+    outside the dispatcher's own supervision.
+    """
+    sanctioned = {p.strip().lower() for p in config.lead_profiles if p.strip()}
+    if not sanctioned:
+        return False
+    profile = (os.environ.get("HERMES_PROFILE") or "").strip().lower()
+    if profile not in sanctioned:
+        return False
+    return bool((os.environ.get("HERMES_KANBAN_TASK") or "").strip())
+
+
 def _approve_launch(meta: dict[str, Any], config: PluginConfig, plugin_context: Any) -> tuple[bool, str]:
     """Gate a top-level workflow launch when ``require_launch_approval`` is on.
 
     Runs in the launching (parent) foreground turn, so the session context is
-    native — no cross-thread propagation needed. Returns ``(approved, reason)``.
+    native — no cross-thread propagation needed. Returns ``(approved, detail)``,
+    where ``detail`` names the granting AUTHORITY when approved and the refusal
+    REASON when denied; the caller stamps the authority onto the run record so a
+    launch nobody watched is still attributable afterwards.
     Channels: gateway -> approve/deny buttons (blocks until tapped); CLI ->
-    synchronous confirm; no interactive channel (headless) -> deny.
+    synchronous confirm; sanctioned dispatched Lead -> granted unattended;
+    no interactive channel (headless) -> deny.
     """
     if not config.require_launch_approval:
-        return True, ""
+        return True, "approval-not-required"
+
+    # Before any channel is consulted: a dispatched Lead has no human to ask,
+    # and asking one would deadlock the card until it timed out.
+    if _sanctioned_lead_launch(config):
+        return True, "sanctioned-lead"
 
     name = str(meta.get("name") or "workflow")
     desc = str(meta.get("description") or "")
@@ -944,7 +986,7 @@ def _approve_launch(meta: dict[str, Any], config: PluginConfig, plugin_context: 
                 },
             )
             ok = bool(decision.get("resolved")) and decision.get("choice") not in (None, "deny")
-            return (True, "") if ok else (False, "workflow launch was denied or timed out")
+            return (True, "gateway") if ok else (False, "workflow launch was denied or timed out")
     except Exception as exc:
         return False, f"launch approval failed: {type(exc).__name__}: {exc}"
 
@@ -960,12 +1002,14 @@ def _approve_launch(meta: dict[str, Any], config: PluginConfig, plugin_context: 
             choice = _approval.prompt_dangerous_approval(label, human, approval_callback=cb)
         except Exception as exc:
             return False, f"launch approval prompt failed: {type(exc).__name__}: {exc}"
-        return (True, "") if (choice and choice != "deny") else (False, "workflow launch was denied")
+        return (True, "cli") if (choice and choice != "deny") else (False, "workflow launch was denied")
 
     return False, (
         "launch approval required but no interactive channel "
-        "(set require_launch_approval=false / HERMES_DYNAMIC_WORKFLOWS_REQUIRE_LAUNCH_APPROVAL=0 "
-        "for unattended/headless use)"
+        "(a board-dispatched Lead belongs in dynamic_workflows.lead_profiles / "
+        "HERMES_DYNAMIC_WORKFLOWS_LEAD_PROFILES; set require_launch_approval=false / "
+        "HERMES_DYNAMIC_WORKFLOWS_REQUIRE_LAUNCH_APPROVAL=0 only to un-gate every "
+        "session on this machine)"
     )
 
 

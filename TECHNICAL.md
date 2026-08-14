@@ -300,6 +300,12 @@ forbids `except:` / `except BaseException`.
 |---|---|---|---|
 | `hermes` (default) | in-process Hermes `AIAgent` | full toolsets + MCP | native `structured_output` tool call |
 | `pi` | the pi coding lane's `run-pi-task.sh` in a subprocess | read/write/edit/grep/find/ls/bash — no web, no MCP, no subagents | prompt + parse + validate + retry |
+| `claude` | the claude coding lane's `run-claude-task.sh` in a subprocess | Claude Code's own tools, MCP presets, and its own subagents | prompt + parse + validate + retry (the wrapper *can* do `--json-schema`; this adapter does not use it yet) |
+
+`pi` and `claude` are both thin lane hooks over one base
+(`child/runners/wrapper.py`) because the two wrappers speak the same process
+contract. Mixing them in one workflow is the point: hand a node to `claude`
+where judgment or breadth is the bottleneck and the routine edits to `pi`.
 
 Selection precedence: `agent(..., {"runner": …})` → the agent type's `runner:`
 frontmatter → the engine default (`hermes`). `"inherit"` means "no opinion" at

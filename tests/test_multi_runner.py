@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from hermes_dynamic_workflows.child.runners import build_runner_registry
+from hermes_dynamic_workflows.child.runners import claude as claude_runner_module
 from hermes_dynamic_workflows.child.runners import pi as pi_runner_module
 from hermes_dynamic_workflows.child.subprocess_schema import (
     extract_json_value,
@@ -169,7 +170,7 @@ return await agent("work", {"agentType": "neutral"})
         script = """
 meta = {"name": "bad-route", "description": "Test workflow"}
 
-return await agent("work", {"runner": "claude"})
+return await agent("work", {"runner": "codex"})
 """
         hermes = RecordingRunner("hermes")
         pi = RecordingRunner("pi")
@@ -180,7 +181,7 @@ return await agent("work", {"runner": "claude"})
             )
 
         message = str(ctx.exception)
-        self.assertIn("unknown runner 'claude'", message)
+        self.assertIn("unknown runner 'codex'", message)
         self.assertIn("Available runners: hermes, pi", message)
         self.assertEqual(hermes.requests, [])
         self.assertEqual(pi.requests, [])
@@ -399,6 +400,26 @@ class RunnerRegistryTests(unittest.TestCase):
             pi_runner_module.pi_runner_available = original
 
         self.assertNotIn("pi", registry)
+
+    def test_claude_is_registered_when_available(self):
+        original = claude_runner_module.claude_runner_available
+        claude_runner_module.claude_runner_available = lambda: True
+        try:
+            registry = build_runner_registry(PluginConfig(), RecordingRunner("hermes"))
+        finally:
+            claude_runner_module.claude_runner_available = original
+
+        self.assertIsInstance(registry["claude"], claude_runner_module.ClaudeChildAgentRunner)
+
+    def test_claude_is_omitted_when_unavailable(self):
+        original = claude_runner_module.claude_runner_available
+        claude_runner_module.claude_runner_available = lambda: False
+        try:
+            registry = build_runner_registry(PluginConfig(), RecordingRunner("hermes"))
+        finally:
+            claude_runner_module.claude_runner_available = original
+
+        self.assertNotIn("claude", registry)
 
 
 class SubprocessSchemaTests(unittest.TestCase):
@@ -621,6 +642,268 @@ class ChildAgentResultShapeTests(unittest.TestCase):
             metadata["changed_files"], ["a.py"], "wrapper scaffold must not look like work"
         )
         self.assertIsInstance(ChildAgentResult(content="x", metadata=metadata).metadata, dict)
+
+
+class ClaudeAdapterUnitTests(unittest.TestCase):
+    """Spec 019 §12.1 PHASE A step 2 — the claude lane as a child runner."""
+
+    def test_env_isolates_the_run_from_the_kanban_board(self):
+        from hermes_dynamic_workflows.child.worktree import WorkspaceLease
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp) / "work"
+            log_dir = work_dir / "logs"
+            lease = WorkspaceLease(task_id="wf-claude-1", cwd=tmp)
+            env = claude_runner_module._build_env(lease, "claude-worker", work_dir, log_dir)
+
+        self.assertEqual(env["HERMES_PROFILE"], "claude-worker")
+        self.assertEqual(env["HERMES_KANBAN_WORKSPACE"], tmp)
+        self.assertEqual(env["HERMES_KANBAN_TASK_ID"], "wf-claude-1")
+        self.assertEqual(env["CLAUDE_LANE_LOG_DIR"], str(log_dir))
+        self.assertNotIn("HERMES_KANBAN_PIPELINE_NODE", env)
+        self.assertNotIn("HERMES_HOME", env)
+        self.assertFalse(
+            Path(env["CLAUDE_LANE_KANBAN_DB"]).exists(),
+            "a workflow child has no card, so the board must be unreadable to the resolver",
+        )
+        self.assertFalse(Path(env["CODE_NODES"], "adw-emit.sh").exists())
+
+    def test_final_text_prefers_the_summary(self):
+        """Unlike pi's, this lane's summary is the complete final message."""
+        long_text = "y" * 900
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run.jsonl"
+            log.write_text("", encoding="utf-8")
+            self.assertEqual(
+                claude_runner_module._final_text({"summary": long_text}, log), long_text
+            )
+
+    def test_final_text_falls_back_to_the_stream_when_summary_is_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run.jsonl"
+            log.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "system", "subtype": "init"}),
+                        json.dumps(
+                            {
+                                "type": "assistant",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": "first pass"}],
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "assistant",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": "final answer"}],
+                                },
+                            }
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(claude_runner_module._final_text({}, log), "final answer")
+
+    def test_final_text_is_empty_without_a_log_or_a_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "absent.jsonl"
+            self.assertEqual(claude_runner_module._final_text({}, missing), "")
+
+    def test_metadata_carries_cost_session_and_structured_output(self):
+        from hermes_dynamic_workflows.child.worktree import WorkspaceLease
+
+        payload = {
+            "claude_session_id": "sess-c9",
+            "total_cost_usd": 0.42,
+            "changed_files": ["a.py", "_project/README.md"],
+            "tests_run": "pytest",
+            "dispatch": {"model": "opus", "provider": "anthropic"},
+            "structured_output": {"ok": True},
+        }
+        metadata = claude_runner_module._claude_metadata(
+            payload,
+            lease=WorkspaceLease(task_id="wf-claude-2", cwd="/tmp/ws"),
+            lane="claude-worker",
+            agent_type=None,
+            log_path=Path("/tmp/log.jsonl"),
+            attempts=1,
+        )
+
+        self.assertEqual(metadata["runner"], "claude")
+        self.assertEqual(metadata["lane"], "claude-worker")
+        self.assertEqual(metadata["claude_session_id"], "sess-c9")
+        self.assertEqual(metadata["total_cost_usd"], 0.42)
+        self.assertEqual(metadata["model"], "opus")
+        self.assertEqual(metadata["structured_output"], {"ok": True})
+        self.assertEqual(
+            metadata["changed_files"], ["a.py"], "wrapper scaffold must not look like work"
+        )
+
+    def test_metadata_omits_structured_output_when_the_wrapper_sent_none(self):
+        from hermes_dynamic_workflows.child.worktree import WorkspaceLease
+
+        metadata = claude_runner_module._claude_metadata(
+            {},
+            lease=WorkspaceLease(task_id="t", cwd="/tmp"),
+            lane="claude-worker",
+            agent_type=None,
+            log_path=Path("/tmp/log.jsonl"),
+        )
+
+        self.assertNotIn("structured_output", metadata)
+
+    def test_availability_needs_the_claude_binary(self):
+        original = claude_runner_module.shutil.which
+        claude_runner_module.shutil.which = lambda _name: None
+        try:
+            self.assertFalse(claude_runner_module.claude_runner_available())
+        finally:
+            claude_runner_module.shutil.which = original
+
+
+class ClaudeWrapperSubprocessTests(unittest.TestCase):
+    """End-to-end over a FAKE wrapper: proves the adapter without spending anything.
+
+    The fake speaks the real contract — one JSON object on stdout, is_error /
+    error_class on failure — so what is under test is this adapter's half of it.
+    """
+
+    # Captures land in FAKE_WRAPPER_CAPTURE, NOT in the log dir: run() deletes
+    # its work dir in a finally, which is the behaviour under test elsewhere.
+    WRAPPER = """#!/usr/bin/env bash
+set -euo pipefail
+PROMPT_FILE=""
+TASK_ID=""
+RESUME=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --prompt-file) PROMPT_FILE="$2"; shift 2 ;;
+    --task-id)     TASK_ID="$2"; shift 2 ;;
+    --resume)      RESUME="$2"; shift 2 ;;
+    *) echo "unknown arg $1" >&2; exit 64 ;;
+  esac
+done
+cp "$PROMPT_FILE" "${FAKE_WRAPPER_CAPTURE}/prompt.seen"
+printf '%s' "${HERMES_PROFILE}" > "${FAKE_WRAPPER_CAPTURE}/profile.seen"
+printf '%s' "$TASK_ID" > "${FAKE_WRAPPER_CAPTURE}/task-id.seen"
+printf '%s' "${CLAUDE_LANE_LOG_DIR}" > "${FAKE_WRAPPER_CAPTURE}/log-dir.seen"
+__BODY__
+"""
+
+    OK_BODY = (
+        'echo \'{"claude_session_id":"sess-fake","total_cost_usd":0.01,'
+        '"is_error":false,"error_class":null,"changed_files":["a.py"],'
+        '"tests_run":false,"summary":"fake claude finished",'
+        '"dispatch":{"model":"opus"}}\''
+    )
+    FAIL_BODY = (
+        'echo \'{"claude_session_id":null,"total_cost_usd":0.0,"is_error":true,'
+        '"error_class":"provider-wall","changed_files":[],"tests_run":false,'
+        '"summary":"the provider said no"}\'\nexit 1'
+    )
+
+    def _run(self, body, **request_kwargs):
+        """Return (result, error, captures) — captures read before the tmpdir dies."""
+        import os
+
+        from hermes_dynamic_workflows.child.runners.claude import ClaudeChildAgentRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = Path(tmp) / "run-claude-task.sh"
+            wrapper.write_text(self.WRAPPER.replace("__BODY__", body), encoding="utf-8")
+            wrapper.chmod(0o755)
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+            capture = Path(tmp) / "capture"
+            capture.mkdir()
+
+            previous = {
+                key: os.environ.get(key)
+                for key in ("HERMES_DYNAMIC_WORKFLOWS_CLAUDE_TASK_SCRIPT", "FAKE_WRAPPER_CAPTURE")
+            }
+            os.environ["HERMES_DYNAMIC_WORKFLOWS_CLAUDE_TASK_SCRIPT"] = str(wrapper)
+            os.environ["FAKE_WRAPPER_CAPTURE"] = str(capture)
+            result = error = None
+            try:
+                runner = ClaudeChildAgentRunner(PluginConfig(child_timeout_seconds=60.0))
+                request = ChildAgentRequest(
+                    id=1,
+                    prompt="do the thing",
+                    label="node-1",
+                    phase=None,
+                    toolsets=[],
+                    cwd=str(workspace),
+                    **request_kwargs,
+                )
+                try:
+                    result = runner.run(request)
+                except ChildAgentError as exc:
+                    error = exc
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+
+            captures = {
+                path.name: path.read_text(encoding="utf-8") for path in capture.iterdir()
+            }
+            return result, error, captures
+
+    def test_a_clean_run_returns_the_final_text_and_metadata(self):
+        result, error, _ = self._run(self.OK_BODY)
+
+        self.assertIsNone(error)
+        self.assertEqual(result.content, "fake claude finished")
+        self.assertEqual(result.metadata["runner"], "claude")
+        self.assertEqual(result.metadata["lane"], "claude-worker")
+        self.assertEqual(result.metadata["claude_session_id"], "sess-fake")
+        self.assertEqual(result.metadata["model"], "opus")
+        self.assertEqual(result.metadata["changed_files"], ["a.py"])
+        self.assertTrue(result.metadata["task_id"].startswith("wf-claude-"))
+
+    def test_the_model_override_reaches_the_wrapper_as_a_dispatch_block(self):
+        _, _, captures = self._run(self.OK_BODY, model="sonnet")
+
+        self.assertIn("```dispatch", captures["prompt.seen"])
+        self.assertIn("model: sonnet", captures["prompt.seen"])
+
+    def test_the_lane_reaches_the_wrapper_as_hermes_profile(self):
+        _, _, captures = self._run(self.OK_BODY)
+
+        self.assertEqual(captures["profile.seen"], "claude-worker")
+        self.assertTrue(captures["task-id.seen"].startswith("wf-claude-"))
+
+    def test_the_log_dir_the_wrapper_sees_is_not_the_board_log_dir(self):
+        _, _, captures = self._run(self.OK_BODY)
+
+        self.assertNotIn("/.hermes/kanban/logs", captures["log-dir.seen"])
+
+    def test_a_wrapper_failure_names_its_error_class(self):
+        _, error, _ = self._run(self.FAIL_BODY)
+
+        self.assertIsNotNone(error)
+        self.assertIn("provider-wall", str(error))
+        self.assertIn("the provider said no", str(error))
+
+    def test_an_unknown_lane_names_what_is_available(self):
+        from hermes_dynamic_workflows.child.runners.claude import ClaudeChildAgentRunner
+
+        runner = ClaudeChildAgentRunner(PluginConfig())
+        request = ChildAgentRequest(
+            id=1, prompt="w", label="w", phase=None, toolsets=[], lane="no-such-lane"
+        )
+        with self.assertRaises(ChildAgentError) as ctx:
+            runner.run(request)
+
+        self.assertIn("run-claude-task.sh", str(ctx.exception))
+        self.assertIn("no-such-lane", str(ctx.exception))
 
 
 if __name__ == "__main__":
