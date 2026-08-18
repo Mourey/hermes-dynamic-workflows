@@ -299,14 +299,24 @@ def _available_runners_section() -> str:
     try:
         from ..child.runners.pi import available_lanes, pi_runner_available
     except Exception:
-        return ""
+        pi_can_run = False
+    else:
+        pi_can_run = True
+
+    try:
+        from ..child.runners.kimi import kimi_runner_available
+    except Exception:
+        kimi_can_run = False
+    else:
+        kimi_can_run = True
+
     lines = [
         "Available child runners for agent(prompt, {\"runner\": ...}):",
         "- hermes: in-process Hermes AIAgent — full toolsets, MCP, native "
         "structured output. The default; omit `runner` to get it.",
     ]
-    try:
-        if pi_runner_available():
+    if pi_can_run:
+        try:
             lanes = ", ".join(available_lanes()) or "builder"
             lines.append(
                 "- pi: cheap pi coding lane in a subprocess — files/terminal "
@@ -314,8 +324,15 @@ def _available_runners_section() -> str:
                 "from the lane conf unless opts[\"model\"] names one in pi's "
                 f"catalog. Lanes on this machine: {lanes}."
             )
-    except Exception:
-        pass
+        except Exception:
+            pass
+    if kimi_can_run:
+        lines.append(
+            "- kimi: kimi coding agent in a subprocess — "
+            "subscription-billed (no per-node cost data), "
+            "k3/k3-256k models via OAuth. The model comes from the lane conf "
+            "or opts[\"model\"]. No web, no MCP, no nested subagents."
+        )
     if len(lines) == 2:
         return ""
     return "\n".join(lines)

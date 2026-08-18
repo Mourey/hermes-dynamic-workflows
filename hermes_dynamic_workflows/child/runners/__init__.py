@@ -19,6 +19,7 @@ from ...core.types import ChildAgentRunner
 
 HERMES_RUNNER = "hermes"
 PI_RUNNER = "pi"
+KIMI_RUNNER = "kimi"
 
 
 def build_runner_registry(
@@ -31,6 +32,9 @@ def build_runner_registry(
     pi_runner = _build_pi_runner(config)
     if pi_runner is not None:
         registry[PI_RUNNER] = pi_runner
+    kimi_runner = _build_kimi_runner(config)
+    if kimi_runner is not None:
+        registry[KIMI_RUNNER] = kimi_runner
     return registry
 
 
@@ -44,4 +48,14 @@ def _build_pi_runner(config: PluginConfig) -> ChildAgentRunner | None:
     return PiChildAgentRunner(config)
 
 
-__all__ = ["HERMES_RUNNER", "PI_RUNNER", "build_runner_registry"]
+def _build_kimi_runner(config: PluginConfig) -> ChildAgentRunner | None:
+    try:
+        from .kimi import KimiChildAgentRunner, kimi_runner_available
+    except Exception:
+        return None
+    if not kimi_runner_available():
+        return None
+    return KimiChildAgentRunner(config)
+
+
+__all__ = ["HERMES_RUNNER", "PI_RUNNER", "KIMI_RUNNER", "build_runner_registry"]

@@ -16,7 +16,7 @@ def default_runner_concurrency() -> dict[str, int]:
     # child (pi, claude) is far heavier than an in-process AIAgent: ten pending
     # awaits and ten spawned CLI processes are very different machine loads.
     # Runners not listed here are bounded only by the global ceiling.
-    return {"pi": 4, "claude": 2}
+    return {"pi": 4, "kimi": 4, "claude": 2}
 
 
 @dataclass(frozen=True)
