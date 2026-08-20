@@ -255,6 +255,13 @@ class AcpxChildAgentRunner(ChildAgentRunner):
             if payload.get("usage_tokens") is not None:
                 state["tokens"] = payload["usage_tokens"]
             state["cost_unavailable"] = payload.get("cost_unavailable")
+            if payload.get("is_error"):
+                state["error_class"] = payload.get("error_class")
+                state["summary"] = payload.get("summary") or ""
+                raise ChildAgentError(
+                    f"acpx child failed ({payload.get('error_class') or 'unknown'}): "
+                    f"{(payload.get('summary') or '')[:300]}"
+                )
             return state["content"]
 
         try:
