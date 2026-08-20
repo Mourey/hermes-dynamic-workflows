@@ -20,6 +20,7 @@ from ...core.types import ChildAgentRunner
 HERMES_RUNNER = "hermes"
 PI_RUNNER = "pi"
 KIMI_RUNNER = "kimi"
+ACPX_RUNNER = "acpx"
 
 
 def build_runner_registry(
@@ -35,6 +36,9 @@ def build_runner_registry(
     kimi_runner = _build_kimi_runner(config)
     if kimi_runner is not None:
         registry[KIMI_RUNNER] = kimi_runner
+    acpx_runner = _build_acpx_runner(config)
+    if acpx_runner is not None:
+        registry[ACPX_RUNNER] = acpx_runner
     return registry
 
 
@@ -58,4 +62,14 @@ def _build_kimi_runner(config: PluginConfig) -> ChildAgentRunner | None:
     return KimiChildAgentRunner(config)
 
 
-__all__ = ["HERMES_RUNNER", "PI_RUNNER", "KIMI_RUNNER", "build_runner_registry"]
+def _build_acpx_runner(config: PluginConfig) -> ChildAgentRunner | None:
+    try:
+        from .acpx import AcpxChildAgentRunner, acpx_runner_available
+    except Exception:
+        return None
+    if not acpx_runner_available():
+        return None
+    return AcpxChildAgentRunner(config)
+
+
+__all__ = ["HERMES_RUNNER", "PI_RUNNER", "KIMI_RUNNER", "ACPX_RUNNER", "build_runner_registry"]
