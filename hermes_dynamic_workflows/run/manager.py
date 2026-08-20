@@ -937,6 +937,36 @@ def _sanctioned_lead_launch(config: PluginConfig) -> bool:
     return bool((os.environ.get("HERMES_KANBAN_TASK") or "").strip())
 
 
+def _sanctioned_cron_launch(config: PluginConfig) -> bool:
+    """True when a cron-fired session is allowed to launch unattended.
+
+    Two conditions, BOTH required:
+
+    1. The operator opted in (``dynamic_workflows.cron_launch: true`` /
+       ``HERMES_DYNAMIC_WORKFLOWS_CRON_LAUNCH``). Default False — the
+       carve-out does not exist until named.
+    2. The current session is a scheduler-fired cron run, detected through
+       the approval engine's own cron classifier
+       (``tools.approval._is_cron_approval_context``), which prefers the
+       session ContextVar over the process env so one cron job cannot taint
+       unrelated gateway/CLI turns in the same process.
+
+    Same shape as the Lead sanction above: cron runs are headless by
+    definition — no approval channel can ever answer for them — and the job
+    definition naming the workflow is the explicit multi-agent opt-in.
+    Fail-closed: any doubt about the context layer denies, and the run error
+    tells the operator exactly which knob to reach for.
+    """
+    if not config.cron_launch:
+        return False
+    try:
+        from tools import approval as _approval
+
+        return bool(_approval._is_cron_approval_context())
+    except Exception:
+        return False
+
+
 def _approve_launch(meta: dict[str, Any], config: PluginConfig, plugin_context: Any) -> tuple[bool, str]:
     """Gate a top-level workflow launch when ``require_launch_approval`` is on.
 
@@ -956,6 +986,11 @@ def _approve_launch(meta: dict[str, Any], config: PluginConfig, plugin_context: 
     # and asking one would deadlock the card until it timed out.
     if _sanctioned_lead_launch(config):
         return True, "sanctioned-lead"
+
+    # Same for a scheduler-fired cron run: headless by definition, sanctioned
+    # only when the operator opted in via dynamic_workflows.cron_launch.
+    if _sanctioned_cron_launch(config):
+        return True, "sanctioned-cron"
 
     name = str(meta.get("name") or "workflow")
     desc = str(meta.get("description") or "")
@@ -1007,7 +1042,9 @@ def _approve_launch(meta: dict[str, Any], config: PluginConfig, plugin_context: 
     return False, (
         "launch approval required but no interactive channel "
         "(a board-dispatched Lead belongs in dynamic_workflows.lead_profiles / "
-        "HERMES_DYNAMIC_WORKFLOWS_LEAD_PROFILES; set require_launch_approval=false / "
+        "HERMES_DYNAMIC_WORKFLOWS_LEAD_PROFILES, a scheduler-fired cron job in "
+        "dynamic_workflows.cron_launch / HERMES_DYNAMIC_WORKFLOWS_CRON_LAUNCH; "
+        "set require_launch_approval=false / "
         "HERMES_DYNAMIC_WORKFLOWS_REQUIRE_LAUNCH_APPROVAL=0 only to un-gate every "
         "session on this machine)"
     )

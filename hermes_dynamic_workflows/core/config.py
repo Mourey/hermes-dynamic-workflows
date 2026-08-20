@@ -66,6 +66,19 @@ class PluginConfig:
     # owns it (see _sanctioned_lead_launch in run/manager.py). Empty by default
     # — the carve-out does not exist until an operator names a profile.
     lead_profiles: tuple[str, ...] = ()
+    # Whether a CRON-FIRED session may launch a workflow with no human in the
+    # loop (default False). Same shape as the lead carve-out: a cron run is
+    # headless by definition, so the gateway/CLI approval channels can never
+    # answer for one, and the alternative — require_launch_approval: false —
+    # would un-gate every interactive session on the box. A session qualifies
+    # only when the scheduler itself marked it (HERMES_CRON_SESSION, read
+    # through the session-context layer so one cron job cannot taint sibling
+    # turns — see _sanctioned_cron_launch in run/manager.py); an interactive
+    # session stays gated even with the flag on. The job definition naming a
+    # workflow IS the explicit multi-agent opt-in the tool description asks
+    # for. Off by default — the carve-out does not exist until an operator
+    # opts in.
+    cron_launch: bool = False
     # What a child agent does when Hermes' approval engine flags a command and
     # no human is present to approve it. The engine itself (hardline blocks,
     # permanent allowlist, yolo, smart mode) still runs upstream regardless;
@@ -261,6 +274,10 @@ def load_config() -> PluginConfig:
         lead_profiles=_as_str_tuple(
             os.getenv("HERMES_DYNAMIC_WORKFLOWS_LEAD_PROFILES", raw.get("lead_profiles")),
             default.lead_profiles,
+        ),
+        cron_launch=_as_bool(
+            os.getenv("HERMES_DYNAMIC_WORKFLOWS_CRON_LAUNCH", raw.get("cron_launch")),
+            default.cron_launch,
         ),
         child_approval_policy=_as_mode(
             os.getenv(

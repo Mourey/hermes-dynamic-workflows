@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 from hermes_dynamic_workflows.core.config import PluginConfig
-from hermes_dynamic_workflows.run.manager import _approve_launch
+from hermes_dynamic_workflows.run.manager import _approve_launch, _sanctioned_cron_launch
 
 META = {"name": "demo", "description": "a workflow"}
 
@@ -24,11 +24,13 @@ def fake_approval(
     legacy_wait=False,
     gateway_timeout=1,
     install_touch=False,
+    cron=False,
 ):
     """Inject fake tools.approval / tools.terminal_tool so _approve_launch's
     channel logic can be exercised without the real Hermes engine."""
     appr = types.ModuleType("tools.approval")
     appr._is_gateway_approval_context = lambda: gateway
+    appr._is_cron_approval_context = lambda: cron
     appr.get_current_session_key = lambda default="default": "sess"
     appr._lock = threading.RLock()
     appr._gateway_queues = {}
@@ -209,6 +211,69 @@ class SanctionedLeadLaunchTests(unittest.TestCase):
             approved, detail = _approve_launch(META, cfg, None)
         self.assertTrue(approved)
         self.assertEqual(detail, "sanctioned-lead")
+
+
+class SanctionedCronLaunchTests(unittest.TestCase):
+    """A scheduler-fired cron run can launch when cron_launch is on; nothing else gains."""
+
+    def test_cron_launch_is_off_by_default(self):
+        self.assertFalse(PluginConfig().cron_launch)
+
+    def test_cron_session_launches_unattended_when_enabled(self):
+        cfg = PluginConfig(cron_launch=True)
+        with fake_approval(cron=True), patch.dict(os.environ, {}, clear=True):
+            approved, detail = _approve_launch(META, cfg, None)
+        self.assertTrue(approved)
+        self.assertEqual(detail, "sanctioned-cron")
+
+    def test_cron_session_denied_when_flag_off(self):
+        with fake_approval(cron=True), patch.dict(os.environ, {}, clear=True):
+            approved, reason = _approve_launch(META, PluginConfig(), None)
+        self.assertFalse(approved)
+        self.assertIn("no interactive channel", reason)
+
+    def test_non_cron_session_stays_gated_when_flag_on(self):
+        """The flag opens the gate for cron runs only, not for every headless session."""
+        cfg = PluginConfig(cron_launch=True)
+        with fake_approval(gateway=False, cron=False), patch.dict(os.environ, {}, clear=True):
+            approved, reason = _approve_launch(META, cfg, None)
+        self.assertFalse(approved)
+        self.assertIn("no interactive channel", reason)
+
+    def test_cron_sanction_never_reaches_an_approval_channel(self):
+        """A sanctioned cron run must not block on a gateway prompt no one can tap."""
+        cfg = PluginConfig(cron_launch=True)
+        with fake_approval(gateway=True, gateway_choice="deny", cron=True), patch.dict(
+            os.environ, {}, clear=True
+        ):
+            approved, detail = _approve_launch(META, cfg, None)
+        self.assertTrue(approved)
+        self.assertEqual(detail, "sanctioned-cron")
+
+    def test_cron_classifier_import_failure_fails_closed(self):
+        """No engine approval layer importable -> deny, never approve."""
+        cfg = PluginConfig(cron_launch=True)
+        with patch.dict(sys.modules, {"tools": None, "tools.approval": None}):
+            self.assertFalse(_sanctioned_cron_launch(cfg))
+
+    def test_headless_denial_names_the_cron_carve_out(self):
+        """The remedy an operator should reach for is the narrow one, not the global one."""
+        env = {k: v for k, v in os.environ.items() if k != "HERMES_INTERACTIVE"}
+        with fake_approval(gateway=False, cron=True), patch.dict(os.environ, env, clear=True):
+            _, reason = _approve_launch(META, PluginConfig(), None)
+        self.assertIn("cron_launch", reason)
+
+
+class CronLaunchConfigTests(unittest.TestCase):
+    def test_env_var_enables(self):
+        from hermes_dynamic_workflows.core.config import load_config
+
+        with patch.dict(
+            os.environ,
+            {"HERMES_DYNAMIC_WORKFLOWS_CRON_LAUNCH": "1"},
+            clear=False,
+        ):
+            self.assertTrue(load_config().cron_launch)
 
 
 class LeadProfilesConfigTests(unittest.TestCase):
