@@ -92,6 +92,13 @@ def acpx_binary() -> Path:
     return Path("/usr/local/bin/acpx")  # fallback; availability gate checks is_file()
 
 
+def _resolve_kimi_binary() -> Path:
+    """Return the kimi binary path, honoring KIMI_BINARY_PATH_ENV."""
+    return Path(
+        os.environ.get(KIMI_BINARY_PATH_ENV, "").strip() or str(DEFAULT_KIMI_BINARY)
+    ).expanduser()
+
+
 def acpx_runner_available() -> bool:
     """True when acpx resolves AND `kimi acp` resolves under the child PATH.
 
@@ -101,9 +108,7 @@ def acpx_runner_available() -> bool:
     """
     if not acpx_binary().is_file():
         return False
-    kimi_bin = Path(
-        os.environ.get(KIMI_BINARY_PATH_ENV, "").strip() or str(DEFAULT_KIMI_BINARY)
-    ).expanduser()
+    kimi_bin = _resolve_kimi_binary()
     if not kimi_bin.is_file():
         return False
     try:
@@ -555,7 +560,7 @@ class AcpxChildAgentRunner(ChildAgentRunner):
         env["HERMES_KANBAN_WORKSPACE"] = lease.cwd
         env["HERMES_KANBAN_TASK_ID"] = lease.task_id
         # acpx-specific: kimi-code/bin must be on the child PATH for `kimi acp`.
-        kimi_dir = str(Path.home() / ".kimi-code" / "bin")
+        kimi_dir = str(_resolve_kimi_binary().parent)
         old_path = env.get("PATH", "")
         env["PATH"] = kimi_dir + (os.pathsep + old_path if old_path else "")
         # Point logs away from the ADW surfaces.
